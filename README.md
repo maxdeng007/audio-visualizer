@@ -3,7 +3,7 @@
 
 A React-based audio visualization tool.
 
-![Screenshot](https://images.weserv.nl/?url=https://article.biliimg.com/bfs/new_dyn/c3360c66ccac3fabb1504d3eec3491b16741540.png "Audio Visualizer")
+![Screenshot](https://images.weserv.nl/?url=https://article.biliimg.com/bfs/new_dyn/c3360c66ccac3fabb1504d3eec3491b16741540.png "Audio Visualizer"){width="300px"}
 
 ## Features
 
