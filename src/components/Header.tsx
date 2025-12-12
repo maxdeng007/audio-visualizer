@@ -1,6 +1,6 @@
 import React from 'react';
-// TODO: Replace with actual logo asset import
-const logoUrl = '/public/logo_AV.svg';
+
+const logoUrl = '/logo_AV.svg';
 
 const Header: React.FC = () => (
   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
