@@ -41,24 +41,53 @@ const VisualizerCanvas = forwardRef<HTMLCanvasElement, VisualizerCanvasProps>(({
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+
+    // Get actual display size from container
+    const container = canvas.parentElement;
+    const displayWidth = container ? container.clientWidth : width;
+    const displayHeight = container ? container.clientHeight : height;
+    
+    // Handle device pixel ratio for crisp rendering
+    const dpr = window.devicePixelRatio || 1;
+    const actualWidth = Math.floor(displayWidth * dpr);
+    const actualHeight = Math.floor(displayHeight * dpr);
+
+    // Set canvas internal size to match display size with DPR
+    if (canvas.width !== actualWidth || canvas.height !== actualHeight) {
+      canvas.width = actualWidth;
+      canvas.height = actualHeight;
+      // Reset transform and scale context to account for DPR
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.scale(dpr, dpr);
+    }
+    
+    // Update canvas CSS size to match container
+    canvas.style.width = `${displayWidth}px`;
+    canvas.style.height = `${displayHeight}px`;
+
     let animationId: number;
     const bufferLength = analyser.fftSize;
     const dataArray = new Uint8Array(bufferLength);
     const barDataArray = new Uint8Array(analyser.frequencyBinCount);
+    let prevBins: number[] | null = null;
 
     function drawOscilloscope() {
       if (!analyser || !ctx) return;
       analyser.getByteTimeDomainData(dataArray);
+      const container = canvas.parentElement;
+      const displayWidth = container ? container.clientWidth : width;
+      const displayHeight = container ? container.clientHeight : height;
+      
       ctx.fillStyle = backgroundColor;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillRect(0, 0, displayWidth, displayHeight);
       ctx.lineWidth = lineWidth;
       ctx.strokeStyle = waveColor;
       ctx.beginPath();
-      const sliceWidth = canvas.width / bufferLength;
+      const sliceWidth = displayWidth / bufferLength;
       let x = 0;
       for (let i = 0; i < bufferLength; i++) {
         const v = (dataArray[i] - 128) / 128;
-        const y = v * (waveHeight / 2) + canvas.height / 2;
+        const y = v * (waveHeight / 2) + displayHeight / 2;
         if (i === 0) {
           ctx.moveTo(x, y);
         } else {
@@ -66,95 +95,156 @@ const VisualizerCanvas = forwardRef<HTMLCanvasElement, VisualizerCanvasProps>(({
         }
         x += sliceWidth;
       }
-      ctx.lineTo(canvas.width, canvas.height / 2);
+      ctx.lineTo(displayWidth, displayHeight / 2);
       ctx.stroke();
     }
 
     function drawBars() {
       if (!analyser || !ctx) return;
       analyser.getByteFrequencyData(barDataArray);
+      const container = canvas.parentElement;
+      const displayWidth = container ? container.clientWidth : width;
+      const displayHeight = container ? container.clientHeight : height;
+      
       ctx.fillStyle = backgroundColor;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      const bars = 32;
-      const barWidth = canvas.width / bars - 4;
+      ctx.fillRect(0, 0, displayWidth, displayHeight);
+      const bins = barDataArray.length;
+      const maxVal = Math.max(1, ...barDataArray);
+      if (!prevBins || prevBins.length !== bins) prevBins = new Array(bins).fill(0);
+      const smoothedBins = new Array(bins);
+      for (let i = 0; i < bins; i++) {
+        const normalized = barDataArray[i] / maxVal;
+        smoothedBins[i] = smoothing > 0
+          ? smoothing * (prevBins[i] ?? normalized) + (1 - smoothing) * normalized
+          : normalized;
+      }
+      prevBins = smoothedBins;
+      const bars = Math.max(1, barCount);
+      const barWidth = displayWidth / bars - 4;
       for (let i = 0; i < bars; i++) {
-        const value = barDataArray[Math.floor(i * barDataArray.length / bars)];
-        const barHeight = (value / 255) * waveHeight;
+        const binStart = Math.floor(i * bins / bars);
+        const binEnd = Math.floor((i + 1) * bins / bars);
+        let sum = 0;
+        let count = 0;
+        for (let j = binStart; j < binEnd; j++) {
+          sum += smoothedBins[j];
+          count++;
+        }
+        const value = count > 0 ? sum / count : 0;
+        const barHeight = value * waveHeight * 8; // align with export scaling
         ctx.fillStyle = waveColor;
-        ctx.fillRect(i * (barWidth + 4), canvas.height - barHeight, barWidth, barHeight);
+        ctx.fillRect(i * (barWidth + 4), displayHeight - barHeight, barWidth, barHeight);
       }
     }
 
     function drawCircle() {
       if (!analyser || !canvasRef.current) return;
-      const ctx = canvasRef.current.getContext('2d');
-      if (!ctx) return;
+      const ctxCircle = canvasRef.current.getContext('2d');
+      if (!ctxCircle) return;
       analyser.getByteFrequencyData(barDataArray);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.save();
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      const radius = Math.min(canvas.width, canvas.height) / 4;
-      const bars = 32;
+      const container = canvas.parentElement;
+      const displayWidth = container ? container.clientWidth : width;
+      const displayHeight = container ? container.clientHeight : height;
+      
+      ctxCircle.fillStyle = backgroundColor;
+      ctxCircle.fillRect(0, 0, displayWidth, displayHeight);
+      ctxCircle.save();
+      ctxCircle.translate(displayWidth / 2, displayHeight / 2);
+      const radius = Math.min(displayWidth, displayHeight) / 4;
+      const bars = Math.max(1, barCount);
+      const bins = barDataArray.length;
+      const maxVal = Math.max(1, ...barDataArray);
+      if (!prevBins || prevBins.length !== bins) prevBins = new Array(bins).fill(0);
+      const smoothedBins = new Array(bins);
+      for (let i = 0; i < bins; i++) {
+        const normalized = barDataArray[i] / maxVal;
+        smoothedBins[i] = smoothing > 0
+          ? smoothing * (prevBins[i] ?? normalized) + (1 - smoothing) * normalized
+          : normalized;
+      }
+      prevBins = smoothedBins;
       for (let i = 0; i < bars; i++) {
-        const value = barDataArray[Math.floor(i * barDataArray.length / bars)];
-        const barLength = (value / 255) * (waveHeight + 40);
+        const binStart = Math.floor(i * bins / bars);
+        const binEnd = Math.floor((i + 1) * bins / bars);
+        let sum = 0;
+        let count = 0;
+        for (let j = binStart; j < binEnd; j++) {
+          sum += smoothedBins[j];
+          count++;
+        }
+        const value = count > 0 ? sum / count : 0;
+        const barLength = value * (waveHeight + 40) * 8; // align with export scaling
         const angle = (i / bars) * Math.PI * 2;
-        ctx.save();
-        ctx.rotate(angle);
-        ctx.beginPath();
+        ctxCircle.save();
+        ctxCircle.rotate(angle);
+        ctxCircle.beginPath();
         if (useGradient && gradientColors && gradientColors.length > 1) {
-          const grad = ctx.createLinearGradient(radius, 0, radius + barLength, 0);
+          const grad = ctxCircle.createLinearGradient(radius, 0, radius + barLength, 0);
           gradientColors.forEach((color, j) => {
             grad.addColorStop(j / (gradientColors.length - 1), color);
           });
-          ctx.strokeStyle = grad;
+          ctxCircle.strokeStyle = grad;
         } else {
-          ctx.strokeStyle = waveColor;
+          ctxCircle.strokeStyle = waveColor;
         }
-        ctx.lineWidth = lineWidth + 1;
-        ctx.moveTo(radius, 0);
-        ctx.lineTo(radius + barLength, 0);
-        ctx.stroke();
-        ctx.restore();
+        ctxCircle.lineWidth = lineWidth + 1;
+        ctxCircle.moveTo(radius, 0);
+        ctxCircle.lineTo(radius + barLength, 0);
+        ctxCircle.stroke();
+        ctxCircle.restore();
       }
-      ctx.restore();
+      ctxCircle.restore();
     }
 
     function drawRadial() {
       if (!analyser || !canvasRef.current) return;
-      const ctx = canvasRef.current.getContext('2d');
-      if (!ctx) return;
+      const ctxRadial = canvasRef.current.getContext('2d');
+      if (!ctxRadial) return;
       analyser.getByteFrequencyData(barDataArray);
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.save();
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      const radius = Math.min(canvas.width, canvas.height) / 4;
-      const points = barCount * 4; // More points for smoothness
-      ctx.beginPath();
+      const container = canvas.parentElement;
+      const displayWidth = container ? container.clientWidth : width;
+      const displayHeight = container ? container.clientHeight : height;
+      
+      ctxRadial.fillStyle = backgroundColor;
+      ctxRadial.fillRect(0, 0, displayWidth, displayHeight);
+      ctxRadial.save();
+      ctxRadial.translate(displayWidth / 2, displayHeight / 2);
+      const radius = Math.min(displayWidth, displayHeight) / 4;
+      const bins = barDataArray.length;
+      const maxVal = Math.max(1, ...barDataArray);
+      if (!prevBins || prevBins.length !== bins) prevBins = new Array(bins).fill(0);
+      const smoothedBins = new Array(bins);
+      for (let i = 0; i < bins; i++) {
+        const normalized = barDataArray[i] / maxVal;
+        smoothedBins[i] = smoothing > 0
+          ? smoothing * (prevBins[i] ?? normalized) + (1 - smoothing) * normalized
+          : normalized;
+      }
+      prevBins = smoothedBins;
+      const points = bins; // match export: use all bins for ring smoothness
+      ctxRadial.beginPath();
       for (let i = 0; i <= points; i++) {
         const angle = (i / points) * Math.PI * 2;
-        const dataIdx = Math.floor((i / points) * barDataArray.length);
-        const value = barDataArray[dataIdx];
-        const r = radius + (value / 255) * (waveHeight + 40);
+        const dataIdx = i % bins;
+        const value = smoothedBins[dataIdx];
+        const r = radius + value * (waveHeight + 40) * 8; // align with export scaling
         const x = Math.cos(angle) * r;
         const y = Math.sin(angle) * r;
         if (i === 0) {
-          ctx.moveTo(x, y);
+          ctxRadial.moveTo(x, y);
         } else {
-          ctx.lineTo(x, y);
+          ctxRadial.lineTo(x, y);
         }
       }
-      ctx.closePath();
+      ctxRadial.closePath();
       if (useGradient && gradientColors && gradientColors.length > 1) {
-        // Custom conic gradient
-        const grad = ctx.createConicGradient(0, 0, 0);
+        const grad = ctxRadial.createConicGradient(0, 0, 0);
         gradientColors.forEach((color, i) => {
           grad.addColorStop(i / (gradientColors.length - 1), color);
         });
-        ctx.strokeStyle = grad;
+        ctxRadial.strokeStyle = grad;
       } else if (useGradient) {
-        // Rainbow fallback
-        const grad = ctx.createConicGradient(0, 0, 0);
+        const grad = ctxRadial.createConicGradient(0, 0, 0);
         grad.addColorStop(0, '#ff0000');
         grad.addColorStop(0.16, '#ffff00');
         grad.addColorStop(0.33, '#00ff00');
@@ -162,20 +252,23 @@ const VisualizerCanvas = forwardRef<HTMLCanvasElement, VisualizerCanvasProps>(({
         grad.addColorStop(0.66, '#0000ff');
         grad.addColorStop(0.83, '#ff00ff');
         grad.addColorStop(1, '#ff0000');
-        ctx.strokeStyle = grad;
+        ctxRadial.strokeStyle = grad;
       } else {
-        ctx.strokeStyle = waveColor;
+        ctxRadial.strokeStyle = waveColor;
       }
-      ctx.lineWidth = lineWidth + 2;
-      ctx.shadowColor = useGradient ? '#fff' : waveColor;
-      ctx.shadowBlur = useGradient ? 8 : 0;
-      ctx.stroke();
-      ctx.restore();
+      ctxRadial.lineWidth = lineWidth + 2;
+      ctxRadial.shadowColor = useGradient ? '#fff' : waveColor;
+      ctxRadial.shadowBlur = useGradient ? 8 : 0;
+      ctxRadial.stroke();
+      ctxRadial.restore();
     }
 
     function draw() {
       if (!ctx) return;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const container = canvas.parentElement;
+      const displayWidth = container ? container.clientWidth : width;
+      const displayHeight = container ? container.clientHeight : height;
+      ctx.clearRect(0, 0, displayWidth, displayHeight);
       if (visualizationType === 'oscilloscope') {
         drawOscilloscope();
       } else if (visualizationType === 'bars') {
@@ -189,15 +282,18 @@ const VisualizerCanvas = forwardRef<HTMLCanvasElement, VisualizerCanvasProps>(({
         animationId = requestAnimationFrame(draw);
       }
     }
+
     if (isPlaying) {
       draw();
     } else {
-      if (ctx) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.fillStyle = backgroundColor;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-      }
+      const container = canvas.parentElement;
+      const displayWidth = container ? container.clientWidth : width;
+      const displayHeight = container ? container.clientHeight : height;
+      ctx.clearRect(0, 0, displayWidth, displayHeight);
+      ctx.fillStyle = backgroundColor;
+      ctx.fillRect(0, 0, displayWidth, displayHeight);
     }
+
     return () => {
       if (typeof animationId !== 'undefined' && animationId) cancelAnimationFrame(animationId);
     };
@@ -206,11 +302,18 @@ const VisualizerCanvas = forwardRef<HTMLCanvasElement, VisualizerCanvasProps>(({
   return (
     <canvas
       ref={canvasRef}
-      width={width}
-      height={height}
-      style={{ width: '100%', height, background: backgroundColor, borderRadius: 0, marginBottom: 16 }}
+      style={{ 
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: '100%',
+        height: '100%',
+        display: 'block',
+        background: backgroundColor, 
+        borderRadius: 0
+      }}
     />
   );
 });
 
-export default VisualizerCanvas; 
+export default VisualizerCanvas;

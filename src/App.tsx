@@ -13,8 +13,6 @@ import Header from "./components/Header";
 import VisualizerTypeSelector, { VisualizerType } from "./components/VisualizerTypeSelector";
 import ExportPanel from "./components/ExportPanel";
 import TipsPanel from "./components/TipsPanel";
-import { StagewiseToolbar } from '@stagewise/toolbar-react';
-import { ReactPlugin } from '@stagewise-plugins/react';
 
 const App: React.FC = () => {
   const [audioFile, setAudioFile] = useState<File | null>(null);
@@ -83,6 +81,20 @@ const App: React.FC = () => {
   // Export WebM with real animated wave
   const handleExport = async () => {
     if (!canvasRef.current || !audioFile) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const exportDpr = window.devicePixelRatio || 1;
+    const exportCssWidth = canvas.clientWidth || Math.floor(canvas.width / exportDpr) || 540;
+    const exportCssHeight = canvas.clientHeight || Math.floor(canvas.height / exportDpr) || 159;
+    const exportPixelWidth = Math.floor(exportCssWidth * exportDpr);
+    const exportPixelHeight = Math.floor(exportCssHeight * exportDpr);
+    if (canvas.width !== exportPixelWidth || canvas.height !== exportPixelHeight) {
+      canvas.width = exportPixelWidth;
+      canvas.height = exportPixelHeight;
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(exportDpr, exportDpr);
     setIsExporting(true);
     setExportUrl(null);
     setExportProgress(0);
@@ -91,7 +103,7 @@ const App: React.FC = () => {
     recordedChunksRef.current = [];
     exportCancelRef.current.cancelled = false;
     // Prepare canvas stream (video only, no audio)
-    const canvasStream = canvasRef.current.captureStream(60); // 60fps
+    const canvasStream = canvas.captureStream(60); // 60fps
     const videoTracks = canvasStream.getVideoTracks();
     const muteStream = new MediaStream(videoTracks);
     // Setup MediaRecorder
@@ -136,23 +148,65 @@ const App: React.FC = () => {
       }
       return sum / numChannels;
     }
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    let frame = 0;
+    // Lightweight radix-2 FFT for export to mirror live frequency-domain visuals
+    function fftMagnitudes(input: Float32Array): Float32Array {
+      const n = input.length;
+      const levels = Math.log2(n);
+      if (Math.floor(levels) !== levels) throw new Error('FFT size must be power of 2');
+      const cosTable = new Float32Array(n / 2);
+      const sinTable = new Float32Array(n / 2);
+      for (let i = 0; i < n / 2; i++) {
+        cosTable[i] = Math.cos((2 * Math.PI * i) / n);
+        sinTable[i] = Math.sin((2 * Math.PI * i) / n);
+      }
+      const real = new Float32Array(n);
+      const imag = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        let j = 0;
+        for (let bit = 0; bit < levels; bit++) {
+          j = (j << 1) | ((i >>> bit) & 1);
+        }
+        real[j] = input[i];
+      }
+      for (let size = 2; size <= n; size <<= 1) {
+        const halfSize = size >> 1;
+        const tableStep = n / size;
+        for (let i = 0; i < n; i += size) {
+          for (let j = 0; j < halfSize; j++) {
+            const k = j * tableStep;
+            const tpre = real[i + j + halfSize] * cosTable[k] + imag[i + j + halfSize] * sinTable[k];
+            const tpim = -real[i + j + halfSize] * sinTable[k] + imag[i + j + halfSize] * cosTable[k];
+            real[i + j + halfSize] = real[i + j] - tpre;
+            imag[i + j + halfSize] = imag[i + j] - tpim;
+            real[i + j] += tpre;
+            imag[i + j] += tpim;
+          }
+        }
+      }
+      const mags = new Float32Array(n / 2);
+      for (let i = 0; i < n / 2; i++) {
+        mags[i] = Math.sqrt(real[i] * real[i] + imag[i] * imag[i]);
+      }
+      return mags;
+    }
+
     const totalFrames = Math.ceil(totalDuration * fps);
     let prevWaveform: number[] | null = null;
     let prevBars: number[] | null = null;
+    const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
     function drawExportFrameAccurateByTime(elapsed: number) {
       if (!ctx) return;
+      ctx.setTransform(exportDpr, 0, 0, exportDpr, 0, 0);
+      ctx.clearRect(0, 0, exportCssWidth, exportCssHeight);
       const t = Math.min(elapsed / totalDuration, 1) * totalDuration;
       setExportProgress(Math.min((t / totalDuration) * 100, 100));
       ctx.fillStyle = backgroundColor;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillRect(0, 0, exportCssWidth, exportCssHeight);
       ctx.lineWidth = lineWidth;
       ctx.strokeStyle = waveColor;
       ctx.beginPath();
-      const width = canvas.width;
-      const height = canvas.height;
+      const width = exportCssWidth;
+      const height = exportCssHeight;
       if (visualizationType === 'oscilloscope') {
         // Oscilloscope waveform with exponential smoothing
       const samplesPerFrame = Math.floor(sampleRate / fps);
@@ -191,29 +245,35 @@ const App: React.FC = () => {
         const samplesPerFrame = Math.floor(sampleRate / fps);
         const frameStart = Math.floor(t * sampleRate);
         const fftSize = 1024;
-        const fftData = new Float32Array(fftSize);
+        const fftInput = new Float32Array(fftSize);
         for (let i = 0; i < fftSize; i++) {
           const idx = frameStart + i;
-          fftData[i] = idx < decodedBuffer.length ? getSampleAvg(idx) : 0;
+          fftInput[i] = idx < decodedBuffer.length ? getSampleAvg(idx) : 0;
         }
+        const mags = fftMagnitudes(fftInput);
+        let maxMag = 0;
+        for (let i = 0; i < mags.length; i++) {
+          if (mags[i] > maxMag) maxMag = mags[i];
+        }
+        const magsNorm = Array.from(mags, v => (maxMag ? v / maxMag : 0));
+        if (!prevBars) prevBars = new Array(magsNorm.length).fill(0);
+        const smoothedBins = magsNorm.map((v, i) => smoothing > 0 ? smoothing * (prevBars![i] ?? v) + (1 - smoothing) * v : v);
+        prevBars = smoothedBins;
         const barValues: number[] = [];
         for (let i = 0; i < barCount; i++) {
+          const binStart = Math.floor(i * smoothedBins.length / barCount);
+          const binEnd = Math.floor((i + 1) * smoothedBins.length / barCount);
           let sum = 0;
           let count = 0;
-          const binStart = Math.floor(i * fftSize / barCount);
-          const binEnd = Math.floor((i + 1) * fftSize / barCount);
           for (let j = binStart; j < binEnd; j++) {
-            sum += Math.abs(fftData[j]);
+            sum += smoothedBins[j];
             count++;
           }
           barValues[i] = count > 0 ? sum / count : 0;
         }
-        if (!prevBars) prevBars = barValues.slice();
-        const smoothedBars = barValues.map((v, i) => smoothing * (prevBars![i] ?? v) + (1 - smoothing) * v);
-        prevBars = smoothedBars;
         if (visualizationType === 'bars') {
           for (let i = 0; i < barCount; i++) {
-            const barHeight = smoothedBars[i] * waveHeight * 8; // scale for visibility
+            const barHeight = barValues[i] * waveHeight * 8; // scale for visibility
             const barWidth = width / barCount - 4;
             ctx.fillStyle = waveColor;
             ctx.fillRect(i * (barWidth + 4), height - barHeight, barWidth, barHeight);
@@ -223,7 +283,7 @@ const App: React.FC = () => {
           ctx.translate(width / 2, height / 2);
           const radius = Math.min(width, height) / 4;
           for (let i = 0; i < barCount; i++) {
-            const barLength = smoothedBars[i] * (waveHeight + 40) * 8; // scale for visibility
+            const barLength = barValues[i] * (waveHeight + 40) * 8; // scale for visibility
             const angle = (i / barCount) * Math.PI * 2;
             ctx.save();
             ctx.rotate(angle);
@@ -245,17 +305,17 @@ const App: React.FC = () => {
           }
           ctx.restore();
         } else if (visualizationType === 'radial') {
-          // True radial spectrum export (smooth ring)
+          // Match live radial: use smoothed FFT bins directly for ring
           ctx.save();
           ctx.translate(width / 2, height / 2);
           const radius = Math.min(width, height) / 4;
-          const points = barCount * 4;
+          const points = smoothedBins.length;
           ctx.beginPath();
           for (let i = 0; i <= points; i++) {
+            const idx = i % points;
+            const value = smoothedBins[idx] ?? 0;
+            const r = radius + value * (waveHeight + 40) * 8;
             const angle = (i / points) * Math.PI * 2;
-            const dataIdx = Math.floor((i / points) * fftSize);
-            const value = fftData[dataIdx];
-            const r = radius + (value / 1.5) * (waveHeight + 40); // scale for PCM/FFT
             const x = Math.cos(angle) * r;
             const y = Math.sin(angle) * r;
             if (i === 0) {
@@ -355,7 +415,6 @@ const App: React.FC = () => {
 
   return (
     <>
-      <StagewiseToolbar config={{ plugins: [ReactPlugin] }} />
       <div className="min-h-screen bg-[#faf7f2] flex flex-col items-center justify-start p-8">
         <Header />
         <div className="bg-white rounded shadow-[-2px_2px_0px_0px_#000] w-[600px] max-w-full p-6 mx-auto border-2 border-black"
@@ -505,7 +564,7 @@ const App: React.FC = () => {
               <div className="relative w-full" style={{ position: 'relative', zIndex: 1 }}>
                 <div className="font-bold text-[20px] text-[#0F172A] mb-2" style={{ fontFamily: 'Noto Sans, sans-serif' }}>Preview</div>
                 {/* Preview window (VisualizerCanvas) */}
-                <div className="bg-black w-full" style={{ height: 159, borderRadius: 0 }}>
+                <div className="w-full" style={{ height: 159, borderRadius: 0, position: 'relative', overflow: 'hidden', backgroundColor: backgroundColor, width: '100%' }}>
                   <VisualizerCanvas
                     ref={canvasRef}
                     analyser={analyser}
