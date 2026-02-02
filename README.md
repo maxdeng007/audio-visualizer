@@ -1,9 +1,9 @@
 # Audio Visualizer
-![LOGO](/logo_AV.png "Audio Visualizer")
+![LOGO](/public/logo_AV.png "Audio Visualizer")
 
 A React-based audio visualization tool with beautiful, audio-reactive animations.
 
-![Screenshot](/UI-screenshot.png "Audio Visualizer UI")
+![Screenshot](/public/UI-screenshot.png "Audio Visualizer UI")
 
 ## Features
 
